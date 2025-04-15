@@ -1,0 +1,355 @@
+import os
+import shutil
+from datetime import datetime, timedelta
+from pathlib import Path
+import re
+from collections import Counter
+import tkinter as tk
+from tkinter import ttk
+from tkinter import messagebox
+from tkinter import simpledialog
+
+def round_time_to_5min(dt):
+    # Round down to nearest 5 minutes
+    minutes = (dt.minute // 5) * 5
+    return dt.replace(minute=minutes, second=0, microsecond=0)
+
+def clean_filename(name):
+    # Remove extension
+    base_name = os.path.splitext(name)[0]
+    # Remove common suffixes like (1), (2), etc.
+    cleaned = re.sub(r'\s*[\(\[]?\d+[\)\]]?$', '', base_name)
+    # Remove common suffixes like _1, _2, etc.
+    cleaned = re.sub(r'_\d+$', '', cleaned)
+    # Remove special characters but keep spaces and hyphens
+    cleaned = re.sub(r'[^\w\s-]', ' ', cleaned)
+    # Replace multiple spaces with single space
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return cleaned.strip()
+
+def get_file_type_prefix(filenames):
+    # Get the most common file extension
+    extensions = [os.path.splitext(f)[1].lower() for f in filenames if os.path.splitext(f)[1]]
+    if not extensions:
+        return "Files"
+    
+    most_common = Counter(extensions).most_common(1)[0][0][1:]  # Remove the dot
+    if most_common in ['pdf', 'docx', 'xlsx', 'txt', 'xml', 'json', 'png', 'jpg']:
+        type_map = {
+            'pdf': 'Documents',
+            'docx': 'Word',
+            'xlsx': 'Excel',
+            'txt': 'Text',
+            'xml': 'XML',
+            'json': 'JSON',
+            'png': 'Images',
+            'jpg': 'Images'
+        }
+        return type_map.get(most_common, f"Files_{most_common}")
+    return f"Files_{most_common}"
+
+def find_common_name(filenames):
+    # Clean all filenames
+    cleaned_names = [clean_filename(name) for name in filenames]
+    
+    # If all files have the same base name, use that
+    if len(set(cleaned_names)) == 1:
+        return cleaned_names[0]
+    
+    # Split names into words and count frequencies
+    all_words = []
+    for name in cleaned_names:
+        # Split on spaces, underscores, and hyphens
+        words = re.split(r'[\s_-]+', name)
+        # Filter out very short words and common words
+        words = [w for w in words if len(w) > 2 and w.lower() not in {'the', 'and', 'for', 'with'}]
+        all_words.extend(words)
+    
+    # Count word frequencies
+    word_counts = Counter(all_words)
+    
+    # Try different thresholds for finding common words
+    for threshold_ratio in [0.8, 0.6, 0.4, 0.2]:
+        threshold = len(filenames) * threshold_ratio
+        common_words = [word for word, count in word_counts.most_common()
+                       if count >= threshold]
+        
+        if common_words:
+            # Use up to 3 most common words
+            name = ' '.join(common_words[:3])
+            if name:
+                return name
+    
+    # If no common words found, use file type as prefix
+    return get_file_type_prefix(filenames)
+
+class FileOrganizerGUI:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("File Organizer Preview")
+        self.root.geometry("800x600")
+        
+        # Create main frame
+        self.main_frame = ttk.Frame(self.root, padding="10")
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create preview tree
+        self.tree = ttk.Treeview(self.main_frame, columns=("Files",), show="tree headings")
+        self.tree.heading("Files", text="Files to be moved")
+        self.tree.column("Files", width=400)
+        
+        # Add scrollbar
+        scrollbar = ttk.Scrollbar(self.main_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        
+        # Pack tree and scrollbar
+        self.tree.pack(side="left", fill=tk.BOTH, expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Create buttons frame
+        self.button_frame = ttk.Frame(self.root, padding="10")
+        self.button_frame.pack(fill="x")
+        
+        # Add buttons
+        ttk.Button(self.button_frame, text="Organize Files", command=self.confirm_organization).pack(side="left", padx=5)
+        ttk.Button(self.button_frame, text="Cancel", command=self.root.quit).pack(side="left", padx=5)
+        
+        # Create context menus
+        self.folder_menu = tk.Menu(self.root, tearoff=0)
+        self.folder_menu.add_command(label="Rename Folder", command=self.rename_folder)
+        
+        self.file_menu = tk.Menu(self.root, tearoff=0)
+        self.file_menu.add_command(label="Use as Folder Name", command=self.use_file_name_as_folder)
+        
+        # Bind right-click to show context menu
+        self.tree.bind("<Button-3>", self.show_context_menu)
+        
+        # Bind drag and drop events
+        self.tree.bind("<ButtonPress-1>", self.on_press)
+        self.tree.bind("<B1-Motion>", self.on_motion)
+        self.tree.bind("<ButtonRelease-1>", self.on_release)
+        
+        # Variables for drag and drop
+        self.drag_source = None
+        self.drag_data = None
+        
+        self.proposed_changes = {}
+
+    def show_context_menu(self, event):
+        # Get the item under cursor
+        item = self.tree.identify_row(event.y)
+        if item:
+            # Select the item
+            self.tree.selection_set(item)
+            
+            # Show appropriate menu based on whether it's a file or folder
+            if self.tree.parent(item):  # It's a file
+                self.file_menu.post(event.x_root, event.y_root)
+            else:  # It's a folder
+                self.folder_menu.post(event.x_root, event.y_root)
+
+    def rename_folder(self):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        
+        item = selected[0]
+        # Only allow renaming parent items (folders)
+        if self.tree.parent(item):
+            return
+            
+        old_name = self.tree.item(item)['text']
+        new_name = simpledialog.askstring("Rename Folder", 
+                                        "Enter new folder name:",
+                                        initialvalue=old_name)
+        
+        if new_name and new_name != old_name:
+            # Clean up the new name
+            new_name = re.sub(r'[<>:"/\\|?*]', '_', new_name)
+            
+            # Update the tree view
+            self.tree.item(item, text=new_name)
+            
+            # Update the proposed changes dictionary
+            files = self.proposed_changes.pop(old_name)
+            self.proposed_changes[new_name] = files
+
+    def use_file_name_as_folder(self):
+        selected = self.tree.selection()
+        if not selected:
+            return
+            
+        file_item = selected[0]
+        if not self.tree.parent(file_item):  # Not a file
+            return
+            
+        # Get the file name and clean it
+        file_name = self.tree.item(file_item)['text']
+        base_name = clean_filename(file_name)
+        
+        # Get the parent folder item
+        folder_item = self.tree.parent(file_item)
+        old_folder_name = self.tree.item(folder_item)['text']
+        
+        # Extract the date part from the old folder name
+        date_match = re.search(r'_(\d+\.\d+\.\d+)$', old_folder_name)
+        if date_match:
+            date_part = date_match.group(1)
+            new_folder_name = f"{base_name}_{date_part}"
+            
+            # Clean up the new name
+            new_folder_name = re.sub(r'[<>:"/\\|?*]', '_', new_folder_name)
+            
+            # Update the tree view
+            self.tree.item(folder_item, text=new_folder_name)
+            
+            # Update the proposed changes dictionary
+            files = self.proposed_changes.pop(old_folder_name)
+            self.proposed_changes[new_folder_name] = files
+
+    def collect_proposed_changes(self):
+        # Get current directory
+        current_dir = Path('.')
+        
+        # Skip these files and directories
+        skip_files = {'organize_files.py'}
+        skip_dirs = {'.git', '__pycache__', 'node_modules'}
+        
+        # Dictionary to store files by their rounded timestamps
+        time_groups = {}
+        
+        # Process each file
+        for file_path in current_dir.glob('*'):
+            if file_path.is_file() and file_path.name not in skip_files:
+                try:
+                    # Get creation time
+                    creation_time = datetime.fromtimestamp(file_path.stat().st_ctime)
+                    # Round to nearest 5 minutes
+                    rounded_time = round_time_to_5min(creation_time)
+                    
+                    # Create base group name with timestamp
+                    month = str(rounded_time.month)
+                    day = str(rounded_time.day)
+                    year = rounded_time.strftime('%y')
+                    time_group = f"{month}.{day}.{year}"
+                    
+                    if time_group not in time_groups:
+                        time_groups[time_group] = []
+                    
+                    time_groups[time_group].append(file_path)
+                    
+                except Exception as e:
+                    print(f"Error processing {file_path}: {e}")
+        
+        # Create proposed changes dictionary
+        for time_group, files in time_groups.items():
+            if not files:
+                continue
+            
+            # Find common name from files in this group
+            filenames = [f.name for f in files]
+            common_name = find_common_name(filenames)
+            
+            # Create directory name combining common name and timestamp
+            group_name = f"{common_name}_{time_group}"
+            # Clean up folder name by removing invalid characters
+            group_name = re.sub(r'[<>:"/\\|?*]', '_', group_name)
+            
+            self.proposed_changes[group_name] = files
+        
+        return self.proposed_changes
+
+    def populate_tree(self):
+        for folder_name, files in self.proposed_changes.items():
+            folder_item = self.tree.insert("", "end", text=folder_name, open=True)
+            for file_path in files:
+                self.tree.insert(folder_item, "end", text=file_path.name, values=(str(file_path),))
+
+    def confirm_organization(self):
+        if messagebox.askyesno("Confirm", "Are you sure you want to organize these files?"):
+            self.organize_files()
+            messagebox.showinfo("Success", "Files have been organized!")
+            self.root.quit()
+
+    def organize_files(self):
+        for folder_name, files in self.proposed_changes.items():
+            # Create directory if it doesn't exist
+            group_dir = Path(folder_name)
+            group_dir.mkdir(exist_ok=True)
+            
+            # Move files to directory
+            for file_path in files:
+                try:
+                    target_path = group_dir / file_path.name
+                    if not target_path.exists():  # Only move if target doesn't exist
+                        shutil.move(str(file_path), str(target_path))
+                except Exception as e:
+                    messagebox.showerror("Error", f"Error moving {file_path}: {e}")
+
+    def on_press(self, event):
+        # Get the item under cursor
+        item = self.tree.identify_row(event.y)
+        if item and self.tree.parent(item):  # Only allow dragging files, not folders
+            self.drag_source = item
+            self.drag_data = self.tree.item(item)
+
+    def on_motion(self, event):
+        if self.drag_source:
+            # You could add visual feedback here if desired
+            pass
+
+    def on_release(self, event):
+        if not self.drag_source:
+            return
+            
+        # Get the target item under cursor
+        target_item = self.tree.identify_row(event.y)
+        if not target_item or target_item == self.drag_source:
+            self.drag_source = None
+            self.drag_data = None
+            return
+            
+        # Only allow dropping onto folders (items without parents)
+        if self.tree.parent(target_item):
+            target_item = self.tree.parent(target_item)
+            
+        if target_item:
+            self.move_file_to_folder(self.drag_source, target_item)
+            
+        self.drag_source = None
+        self.drag_data = None
+
+    def move_file_to_folder(self, file_item, folder_item):
+        # Get source and target folder names
+        source_folder = self.tree.parent(file_item)
+        if source_folder == folder_item:
+            return
+            
+        source_folder_name = self.tree.item(source_folder)['text']
+        target_folder_name = self.tree.item(folder_item)['text']
+        
+        # Get file info
+        file_name = self.tree.item(file_item)['text']
+        file_path = Path(self.tree.item(file_item)['values'][0])
+        
+        # Update the proposed changes dictionary
+        self.proposed_changes[source_folder_name].remove(file_path)
+        self.proposed_changes[target_folder_name].append(file_path)
+        
+        # Move the item in the tree
+        self.tree.detach(file_item)
+        self.tree.move(file_item, folder_item, 'end')
+        
+        # If source folder is empty, remove it
+        if not self.proposed_changes[source_folder_name]:
+            self.proposed_changes.pop(source_folder_name)
+            self.tree.delete(source_folder)
+
+    def run(self):
+        self.collect_proposed_changes()
+        self.populate_tree()
+        self.root.mainloop()
+
+if __name__ == '__main__':
+    app = FileOrganizerGUI()
+    app.run() 
